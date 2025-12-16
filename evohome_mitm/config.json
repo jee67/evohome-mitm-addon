@@ -1,0 +1,30 @@
+{
+  "name": "Evohome CH MITM",
+  "version": "1.0.0",
+  "slug": "evohome_mitm",
+  "description": "Statische CH-setpoint begrenzing voor Evohome (idle-safe, fail-safe)",
+  "arch": ["amd64", "aarch64"],
+
+  "startup": "services",
+  "boot": "auto",
+  "uart": true,
+  "host_network": true,
+
+  "devices": [
+    "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0"
+  ],
+
+  "options": {
+    "controller_id": "01:033496",
+    "otb_id": "10:061315",
+    "max_ch_raw": 100,
+    "idle_ch_raw": 20
+  },
+
+  "schema": {
+    "controller_id": "str?",
+    "otb_id": "str?",
+    "max_ch_raw": "int(30,130)",
+    "idle_ch_raw": "int(0,30)"
+  }
+}
