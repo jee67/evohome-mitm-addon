@@ -6,7 +6,7 @@ statisch te begrenzen. Idle-setpoint (10°C) blijft onaangeroerd. Fail-safe pass
 ## Installatie
 
 1. Home Assistant → Instellingen → Add-ons → Add-on Store → Repositories
-2. Voeg toe: https://github.com/<jouw-account>/<jouw-repo>
+2. Voeg toe: https://github.com/jee67/evohome-mitm-addon
 3. Add-on Store → ⋮ → Reload
 4. Installeer **Evohome CH MITM**
 5. Configureer controller_id / otb_id / max_ch_raw / idle_ch_raw
