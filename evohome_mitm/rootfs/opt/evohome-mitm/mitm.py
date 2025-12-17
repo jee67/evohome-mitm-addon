@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
 import os
 import sys
 import json
 import time
+import threading
 import serial
+import paho.mqtt.client as mqtt
 
 from ramses_codec import (
     decode_ramses_line,
@@ -12,75 +15,130 @@ from ramses_codec import (
     set_ch_raw,
 )
 
+# ─────────────────────────────────────────────────────────────
+# Config
+# ─────────────────────────────────────────────────────────────
+
 OPTIONS_FILE = "/data/options.json"
 SERIAL_DEVICE = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A50285BI-if00-port0"
-BAUDRATE = 115200  # pas aan indien jouw evofw3 anders staat
+BAUDRATE = 115200
 
-DEFAULT_CONTROLLER_ID = "01:033496"
-DEFAULT_OTB_ID = "10:061315"
+MQTT_TOPIC_MAX_CH = "evohome/mitm/max_ch_raw"
 
+RAW_MIN = 30
+RAW_MAX = 130
 
-def valid_ramses_id(addr: str) -> bool:
-    # Formaat: "01:033496" (2 digits, ':', 6 digits)
-    return (
-        isinstance(addr, str)
-        and len(addr) == 9
-        and addr[2] == ":"
-        and addr[:2].isdigit()
-        and addr[3:].isdigit()
-    )
+# Ramping
+RAMP_STEP_RAW = 4          # +2.0 °C
+RAMP_INTERVAL_SEC = 30     # per 30 s
 
+# ─────────────────────────────────────────────────────────────
+# Logging banner
+# ─────────────────────────────────────────────────────────────
 
-def fatal(msg: str) -> None:
-    print(f"FATAL: {msg}")
-    sys.exit(1)
-
+print("=== Evohome MITM gestart (2-richting, ramping actief) ===", flush=True)
+print(sys.version, flush=True)
 
 # ─────────────────────────────────────────────────────────────
 # Config laden
 # ─────────────────────────────────────────────────────────────
-try:
-    with open(OPTIONS_FILE, "r") as f:
-        options = json.load(f)
-except Exception as e:
-    fatal(f"kan options.json niet lezen: {e}")
 
-controller_id = (options.get("controller_id") or DEFAULT_CONTROLLER_ID).strip()
-otb_id = (options.get("otb_id") or DEFAULT_OTB_ID).strip()
+with open(OPTIONS_FILE, "r") as f:
+    options = json.load(f)
 
-try:
-    max_ch_raw = int(options.get("max_ch_raw", 100))
-    idle_ch_raw = int(options.get("idle_ch_raw", 20))
-except Exception:
-    fatal("max_ch_raw/idle_ch_raw zijn geen geldige integers")
+controller_id = options.get("controller_id")
+otb_id = options.get("otb_id")
 
-if not valid_ramses_id(controller_id):
-    fatal(f"ongeldig controller_id: {controller_id}")
+idle_ch_raw = int(options.get("idle_ch_raw", 20))
+max_ch_raw_static = int(options.get("max_ch_raw", 90))
 
-if not valid_ramses_id(otb_id):
-    fatal(f"ongeldig otb_id: {otb_id}")
-
-if not os.path.exists(SERIAL_DEVICE):
-    fatal(f"serial device bestaat niet: {SERIAL_DEVICE}")
+mqtt_host = options.get("mqtt_host", "10.0.0.190")
+mqtt_port = int(options.get("mqtt_port", 1883))
+mqtt_timeout = int(options.get("mqtt_timeout_sec", 1800))
 
 # ─────────────────────────────────────────────────────────────
-# Serial openen
+# MQTT state
 # ─────────────────────────────────────────────────────────────
-try:
-    ser = serial.Serial(SERIAL_DEVICE, baudrate=BAUDRATE, timeout=0.1)
-except Exception as e:
-    fatal(f"kan serial device niet openen: {e}")
 
-print("Evohome CH MITM gestart")
-print(f"Device        : {SERIAL_DEVICE}")
-print(f"Controller ID : {controller_id}")
-print(f"OTB ID        : {otb_id}")
-print(f"MAX_CH_RAW    : {max_ch_raw} ({max_ch_raw/2:.1f}°C)")
-print(f"IDLE_CH_RAW   : {idle_ch_raw} ({idle_ch_raw/2:.1f}°C)")
+mqtt_max_ch_raw = None
+mqtt_last_update = 0
+
+def effective_max_ch_raw():
+    if mqtt_max_ch_raw is not None:
+        if time.time() - mqtt_last_update <= mqtt_timeout:
+            return mqtt_max_ch_raw
+    return max_ch_raw_static
+
+def on_mqtt_message(client, userdata, msg):
+    global mqtt_max_ch_raw, mqtt_last_update
+    try:
+        v = int(msg.payload.decode().strip())
+        if RAW_MIN <= v <= RAW_MAX:
+            mqtt_max_ch_raw = v
+            mqtt_last_update = time.time()
+            print(f"MQTT override max_ch_raw={v}", flush=True)
+    except Exception:
+        pass
+
+def mqtt_thread():
+    client = mqtt.Client()
+    client.on_message = on_mqtt_message
+    try:
+        client.connect(mqtt_host, mqtt_port, 60)
+        client.subscribe(MQTT_TOPIC_MAX_CH)
+        client.loop_forever()
+    except Exception as e:
+        print(f"MQTT niet beschikbaar: {e}", flush=True)
+
+threading.Thread(target=mqtt_thread, daemon=True).start()
 
 # ─────────────────────────────────────────────────────────────
-# Main loop (fail-safe)
+# Ramping state
 # ─────────────────────────────────────────────────────────────
+
+last_sent_ch_raw = None
+last_sent_ts = 0
+
+def apply_ramping(target_raw):
+    global last_sent_ch_raw, last_sent_ts
+    now = time.time()
+
+    if last_sent_ch_raw is None:
+        last_sent_ch_raw = target_raw
+        last_sent_ts = now
+        return target_raw
+
+    # idle of daling → direct
+    if target_raw <= idle_ch_raw or target_raw <= last_sent_ch_raw:
+        last_sent_ch_raw = target_raw
+        last_sent_ts = now
+        return target_raw
+
+    elapsed = now - last_sent_ts
+    steps = int(elapsed / RAMP_INTERVAL_SEC)
+    if steps <= 0:
+        return last_sent_ch_raw
+
+    max_up = steps * RAMP_STEP_RAW
+    new_raw = min(target_raw, last_sent_ch_raw + max_up)
+
+    if new_raw != last_sent_ch_raw:
+        last_sent_ch_raw = new_raw
+        last_sent_ts = now
+
+    return new_raw
+
+# ─────────────────────────────────────────────────────────────
+# Serial open
+# ─────────────────────────────────────────────────────────────
+
+ser = serial.Serial(SERIAL_DEVICE, BAUDRATE, timeout=0.1)
+print(f"Serial open: {SERIAL_DEVICE}", flush=True)
+
+# ─────────────────────────────────────────────────────────────
+# Main loop — ALWAYS FORWARD
+# ─────────────────────────────────────────────────────────────
+
 while True:
     raw = b""
     try:
@@ -90,30 +148,34 @@ while True:
 
         frame = decode_ramses_line(raw)
         if frame is None:
-            # Onbekend formaat → pass-through
             ser.write(raw)
             continue
 
+        # Alleen 1F09 controller → OTB muteren
         if is_relevant_ch_setpoint(frame, controller_id, otb_id):
             ch_raw = get_ch_raw(frame)
 
-            # Idle → altijd transparant
-            if ch_raw <= idle_ch_raw:
-                ser.write(raw)
-                continue
+            limit = effective_max_ch_raw()
+            target = min(ch_raw, limit)
+            ramped = apply_ramping(target)
 
-            # Statische bovengrens
-            if ch_raw > max_ch_raw:
-                frame = set_ch_raw(frame, max_ch_raw)
+            if ramped != ch_raw:
+                frame = set_ch_raw(frame, ramped)
                 raw = encode_ramses_frame(frame)
+                print(
+                    f"MUTATE CH {ch_raw/2:.1f} → {ramped/2:.1f} °C",
+                    flush=True,
+                )
 
+        # 🔑 ALTJD exact één write
         ser.write(raw)
 
-    except Exception:
-        # Fail-safe: probeer wat je had door te zetten
+    except Exception as e:
+        # absolute failsafe
         try:
             if raw:
                 ser.write(raw)
         except Exception:
             pass
-        time.sleep(0.1)
+        print(f"EXCEPTION (pass-through): {e}", flush=True)
+        time.sleep(0.05)
