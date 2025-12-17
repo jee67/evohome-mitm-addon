@@ -1,5 +1,5 @@
 # Evohome CH MITM Add-on
-
+# Please be aware, this is a project that has not been tested. Use at your own risk
 Home Assistant add-on die het **CH setpoint van Evohome begrenst**
 via een RAMSES-II man-in-the-middle, zonder de Evohome-regeling zelf te wijzigen.
 
