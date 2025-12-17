@@ -1,8 +1,8 @@
 {
   "name": "Evohome CH MITM",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "slug": "evohome_mitm",
-  "description": "Statische CH-setpoint begrenzing voor Evohome (idle-safe, fail-safe)",
+  "description": "CH-setpoint begrenzing voor Evohome met MQTT-override, ramping en failsafe",
   "arch": ["amd64", "aarch64"],
 
   "startup": "services",
@@ -17,14 +17,23 @@
   "options": {
     "controller_id": "01:033496",
     "otb_id": "10:061315",
-    "max_ch_raw": 100,
-    "idle_ch_raw": 20
+
+    "idle_ch_raw": 20,
+    "max_ch_raw": 90,
+
+    "mqtt_host": "10.0.0.190",
+    "mqtt_port": 1883,
+    "mqtt_timeout_sec": 1800
   },
 
   "schema": {
     "controller_id": "str?",
     "otb_id": "str?",
+    "idle_ch_raw": "int(0,30)",
     "max_ch_raw": "int(30,130)",
-    "idle_ch_raw": "int(0,30)"
+
+    "mqtt_host": "str",
+    "mqtt_port": "int(1,65535)",
+    "mqtt_timeout_sec": "int(300,7200)"
   }
 }
